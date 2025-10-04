@@ -12,6 +12,8 @@
 namespace Symfony\Component\Messenger\Tests\DataCollector;
 
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Messenger\DataCollector\MessengerDataCollector;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\MessageBusInterface;
@@ -164,6 +166,48 @@ class MessengerDataCollectorTest extends TestCase
 
         $this->assertSame('#5', $messages[4]['message']['value']['message']);
         $this->assertSame('second bus', $messages[4]['bus']);
+    }
+
+    public function testCollectsProcessedMessages(): void
+    {
+        $collector = new MessengerDataCollector();
+
+        $request = new Request();
+        $message = new DummyMessage('processed');
+        $request->attributes->set('_virtual_type', 'messenger');
+        $request->attributes->set('messenger.transport', 'async');
+        $request->attributes->set('messenger.message', $message);
+        $request->attributes->set('messenger.ack', true);
+        $request->attributes->set('messenger.retry', false);
+        $request->attributes->set('messenger.profile', [
+            'duration' => 12.5,
+            'memory' => 2048,
+            'events' => [[
+                'name' => 'messenger.message',
+                'category' => 'messenger',
+                'origin' => 0.0,
+                'start_time' => 0.0,
+                'end_time' => 12.5,
+                'duration' => 12.5,
+                'memory' => 2048,
+            ]],
+        ]);
+
+        $collector->collect($request, new Response());
+        $collector->lateCollect();
+
+        $processed = $collector->getProcessedMessages();
+
+        $this->assertCount(1, $processed);
+        $messageData = $processed[0];
+        $this->assertSame('async', $messageData['transport']);
+        $this->assertTrue($messageData['ack']);
+        $this->assertSame(12.5, $messageData['duration']);
+        $this->assertSame(2048, $messageData['memory']);
+        $this->assertSame('ack', $messageData['status']);
+        $this->assertInstanceOf(Data::class, $messageData['message']['value']);
+        $this->assertArrayHasKey(0, $messageData['timeline']);
+        $this->assertSame('messenger.message', $messageData['timeline'][0]['name']);
     }
 
     private function getDataAsString(Data $data): string

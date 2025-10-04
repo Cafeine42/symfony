@@ -47,6 +47,11 @@ class ConsumeMessagesCommand extends Command implements SignalableCommandInterfa
 
     private ?Worker $worker = null;
 
+    /**
+     * @var callable|null
+     */
+    private $profilingConfigurator;
+
     public function __construct(
         private RoutableMessageBus $routableBus,
         private ContainerInterface $receiverLocator,
@@ -57,8 +62,11 @@ class ConsumeMessagesCommand extends Command implements SignalableCommandInterfa
         private array $busIds = [],
         private ?ContainerInterface $rateLimiterLocator = null,
         private ?array $signals = null,
+        ?callable $profilingConfigurator = null,
     ) {
         parent::__construct();
+
+        $this->profilingConfigurator = $profilingConfigurator;
     }
 
     protected function configure(): void
@@ -79,6 +87,7 @@ class ConsumeMessagesCommand extends Command implements SignalableCommandInterfa
                 new InputOption('all', null, InputOption::VALUE_NONE, 'Consume messages from all receivers'),
                 new InputOption('exclude-receivers', null, InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY, 'Exclude specific receivers/transports from consumption (can only be used with --all)'),
                 new InputOption('keepalive', null, InputOption::VALUE_OPTIONAL, 'Whether to use the transport\'s keepalive mechanism if implemented', self::DEFAULT_KEEPALIVE_INTERVAL),
+                new InputOption('profile', null, InputOption::VALUE_NONE, 'Collect profiling data for each handled message'),
             ])
             ->setHelp(<<<'EOF'
                 The <info>%command.name%</info> command consumes messages and dispatches them to the message bus.
@@ -271,6 +280,22 @@ class ConsumeMessagesCommand extends Command implements SignalableCommandInterfa
         $bus = $input->getOption('bus') ? $this->routableBus->getMessageBus($input->getOption('bus')) : $this->routableBus;
 
         $this->worker = new Worker($receivers, $bus, $this->eventDispatcher, $this->logger, $rateLimiters);
+        $profilingTeardown = null;
+
+        if ($input->getOption('profile')) {
+            if (!\is_callable($this->profilingConfigurator)) {
+                throw new RuntimeException('The "--profile" option requires the Symfony profiler to be enabled.');
+            }
+
+            $result = ($this->profilingConfigurator)($this->worker, $this->eventDispatcher, $input, $output, $io);
+
+            if (!\is_array($result) || !isset($result['worker']) || !$result['worker'] instanceof Worker) {
+                throw new \LogicException('The profiling configurator must return an array with a "worker" key containing a Worker instance.');
+            }
+
+            $this->worker = $result['worker'];
+            $profilingTeardown = \is_callable($result['onStop'] ?? null) ? $result['onStop'] : null;
+        }
         $options = [
             'sleep' => $input->getOption('sleep') * 1000000,
         ];
@@ -281,6 +306,10 @@ class ConsumeMessagesCommand extends Command implements SignalableCommandInterfa
         try {
             $this->worker->run($options);
         } finally {
+            if (null !== $profilingTeardown) {
+                $profilingTeardown();
+            }
+
             $this->worker = null;
         }
 

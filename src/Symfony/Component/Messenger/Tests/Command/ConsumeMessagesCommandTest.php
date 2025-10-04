@@ -17,8 +17,12 @@ use Psr\Log\LoggerInterface;
 use Psr\Log\LoggerTrait;
 use Symfony\Component\Console\Application;
 use Symfony\Component\Console\Exception\InvalidOptionException;
+use Symfony\Component\Console\Exception\RuntimeException as ConsoleRuntimeException;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Tester\CommandCompletionTester;
 use Symfony\Component\Console\Tester\CommandTester;
+use Symfony\Component\Console\Style\SymfonyStyle;
 use Symfony\Component\DependencyInjection\Container;
 use Symfony\Component\DependencyInjection\ServiceLocator;
 use Symfony\Component\EventDispatcher\EventDispatcher;
@@ -32,6 +36,7 @@ use Symfony\Component\Messenger\RoutableMessageBus;
 use Symfony\Component\Messenger\Stamp\BusNameStamp;
 use Symfony\Component\Messenger\Tests\Fixtures\ResettableDummyReceiver;
 use Symfony\Component\Messenger\Transport\Receiver\ReceiverInterface;
+use Symfony\Component\Messenger\Worker;
 
 class ConsumeMessagesCommandTest extends TestCase
 {
@@ -480,5 +485,91 @@ class ConsumeMessagesCommandTest extends TestCase
             '--all' => true,
             '--exclude-receivers' => ['dummy-receiver1', 'dummy-receiver2'],
         ]);
+    }
+
+    public function testProfileOptionRequiresConfigurator(): void
+    {
+        $receiver = $this->createMock(ReceiverInterface::class);
+        $receiver->expects($this->never())->method('get');
+
+        $receiverLocator = new Container();
+        $receiverLocator->set('dummy-receiver', $receiver);
+
+        $bus = $this->createMock(RoutableMessageBus::class);
+
+        $command = new ConsumeMessagesCommand($bus, $receiverLocator, new EventDispatcher());
+
+        $application = new Application();
+        if (method_exists($application, 'addCommand')) {
+            $application->addCommand($command);
+        } else {
+            $application->add($command);
+        }
+
+        $tester = new CommandTester($application->get('messenger:consume'));
+
+        $this->expectException(ConsoleRuntimeException::class);
+        $this->expectExceptionMessage('The "--profile" option requires the Symfony profiler to be enabled.');
+
+        $tester->execute([
+            'receivers' => ['dummy-receiver'],
+            '--profile' => true,
+            '--limit' => 1,
+        ]);
+    }
+
+    public function testProfileOptionConfiguresWorker(): void
+    {
+        $envelope = new Envelope(new \stdClass(), [new BusNameStamp('dummy-bus')]);
+
+        $receiver = $this->createMock(ReceiverInterface::class);
+        $receiver->expects($this->once())->method('get')->willReturn([$envelope]);
+
+        $receiverLocator = new Container();
+        $receiverLocator->set('dummy-receiver', $receiver);
+
+        $bus = $this->createMock(MessageBusInterface::class);
+        $bus->expects($this->once())->method('dispatch');
+
+        $busLocator = new Container();
+        $busLocator->set('dummy-bus', $bus);
+
+        $dispatcher = new EventDispatcher();
+
+        $configureCalls = 0;
+        $teardownCalls = 0;
+
+        $profilingConfigurator = function (Worker $worker, EventDispatcherInterface $eventDispatcher, InputInterface $input, OutputInterface $output, SymfonyStyle $io) use (&$configureCalls, &$teardownCalls, $dispatcher) {
+            ++$configureCalls;
+            $this->assertSame($dispatcher, $eventDispatcher);
+            $this->assertInstanceOf(SymfonyStyle::class, $io);
+
+            return [
+                'worker' => $worker,
+                'onStop' => function () use (&$teardownCalls) {
+                    ++$teardownCalls;
+                },
+            ];
+        };
+
+        $command = new ConsumeMessagesCommand(new RoutableMessageBus($busLocator), $receiverLocator, $dispatcher, profilingConfigurator: $profilingConfigurator);
+
+        $application = new Application();
+        if (method_exists($application, 'addCommand')) {
+            $application->addCommand($command);
+        } else {
+            $application->add($command);
+        }
+
+        $tester = new CommandTester($application->get('messenger:consume'));
+        $tester->execute([
+            'receivers' => ['dummy-receiver'],
+            '--profile' => true,
+            '--limit' => 1,
+        ]);
+
+        $tester->assertCommandIsSuccessful();
+        $this->assertSame(1, $configureCalls);
+        $this->assertSame(1, $teardownCalls);
     }
 }

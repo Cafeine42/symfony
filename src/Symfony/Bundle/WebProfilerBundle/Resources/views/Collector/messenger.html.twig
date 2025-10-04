@@ -36,6 +36,54 @@
         #collector-content .message-bus .trace li.selected {
             background: var(--highlight-selected-line);
         }
+
+        .message-processing .metrics {
+            margin-bottom: 15px;
+        }
+
+        .message-timeline {
+            border: var(--border);
+            background: var(--base-0);
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: var(--border-radius);
+        }
+
+        .message-timeline-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            gap: 10px;
+        }
+
+        .message-timeline .label {
+            margin-left: auto;
+        }
+
+        .message-timeline-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        .message-timeline-table th,
+        .message-timeline-table td {
+            padding: 6px 8px;
+            border-top: var(--border);
+        }
+
+        .message-timeline-table thead th {
+            background: var(--base-1);
+        }
+
+        .message-timeline-table tbody tr:nth-child(even) {
+            background: var(--base-1);
+        }
+
+        .message-processing .empty {
+            margin: 15px 0;
+        }
     </style>
 {% endblock %}
 
@@ -81,10 +129,146 @@
 {% block panel %}
     <h2>Messages</h2>
 
+    {% set processed = collector.processedMessages %}
+
+    {% if processed is not empty %}
+        {% set successful = processed|filter(message => message.status == 'ack') %}
+        {% set retrying = processed|filter(message => message.status == 'retry') %}
+        {% set failed = processed|filter(message => message.status == 'failed') %}
+        {% set failedOrRetry = processed|filter(message => message.status != 'ack') %}
+
+        <div class="message-processing">
+            <h3>Worker processing</h3>
+
+            <div class="metrics">
+                <div class="metric">
+                    <span class="value">{{ processed|length }}</span>
+                    <span class="label">Processed messages</span>
+                </div>
+
+                <div class="metric">
+                    <span class="value">{{ successful|length }}</span>
+                    <span class="label">Acknowledged</span>
+                </div>
+
+                <div class="metric">
+                    <span class="value">{{ retrying|length }}</span>
+                    <span class="label">Scheduled for retry</span>
+                </div>
+
+                <div class="metric">
+                    <span class="value">{{ failed|length }}</span>
+                    <span class="label">Failed</span>
+                </div>
+            </div>
+
+            <div class="sf-tabs message-processing">
+                <div class="tab">
+                    <h3 class="tab-title">Timeline<span class="badge">{{ processed|length }}</span></h3>
+
+                    <div class="tab-content">
+                        {% for message in processed %}
+                            {% set statusClass = {
+                                'ack': 'status-success',
+                                'retry': 'status-warning',
+                                'failed': 'status-error'
+                            }[message.status] %}
+                            {% set statusLabel = {
+                                'ack': 'Acknowledged',
+                                'retry': 'Retry scheduled',
+                                'failed': 'Failed'
+                            }[message.status] %}
+
+                            <div class="message-timeline">
+                                <header class="message-timeline-header">
+                                    <span class="dump-inline">{{ profiler_dump(message.message.type) }}</span>
+                                    <span class="label {{ statusClass }}">{{ statusLabel }}</span>
+                                </header>
+
+                                <div class="metrics">
+                                    <div class="metric">
+                                        <span class="value">{{ message.duration is not null ? '%.2f'|format(message.duration) : 'n/a' }} <span class="unit">ms</span></span>
+                                        <span class="label">Duration</span>
+                                    </div>
+
+                                    <div class="metric">
+                                        <span class="value">{{ message.memory is not null ? '%.2f'|format(message.memory / 1024 / 1024) : 'n/a' }} <span class="unit">MiB</span></span>
+                                        <span class="label">Peak memory</span>
+                                    </div>
+
+                                    <div class="metric">
+                                        <span class="value">{{ message.transport ?? 'n/a' }}</span>
+                                        <span class="label">Transport</span>
+                                    </div>
+                                </div>
+
+                                {% if message.timeline %}
+                                    {% set origin = message.origin ?? 0 %}
+                                    <table class="message-timeline-table">
+                                        <thead>
+                                            <tr>
+                                                <th scope="col">Event</th>
+                                                <th scope="col">Start (ms)</th>
+                                                <th scope="col">Duration (ms)</th>
+                                                <th scope="col">Memory</th>
+                                                <th scope="col">Category</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for event in message.timeline %}
+                                                <tr>
+                                                    <td>{{ event.name }}</td>
+                                                    <td>{{ '%.2f'|format((event.start_time ?? 0) - origin) }}</td>
+                                                    <td>{{ '%.2f'|format(event.duration ?? 0) }}</td>
+                                                    <td>
+                                                        {% if event.memory %}
+                                                            {{ '%.2f'|format(event.memory / 1024 / 1024) }} MiB
+                                                        {% else %}
+                                                            0 B
+                                                        {% endif %}
+                                                    </td>
+                                                    <td>{{ event.category }}</td>
+                                                </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                {% else %}
+                                    <p class="text-muted">No stopwatch events have been recorded for this message.</p>
+                                {% endif %}
+                            </div>
+                        {% else %}
+                            <div class="empty">
+                                <p>No messages were processed.</p>
+                            </div>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <div class="tab">
+                    <h3 class="tab-title">Successful<span class="badge status-success">{{ successful|length }}</span></h3>
+
+                    <div class="tab-content">
+                        {{ _self.render_processed_messages(successful) }}
+                    </div>
+                </div>
+
+                <div class="tab">
+                    <h3 class="tab-title">Failed<span class="badge {{ failedOrRetry ? 'status-error' }}">{{ failedOrRetry|length }}</span></h3>
+
+                    <div class="tab-content">
+                        {{ _self.render_processed_messages(failedOrRetry) }}
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+
     {% if collector.messages is empty %}
+        {% if processed is empty %}
         <div class="empty empty-panel">
             <p>No messages have been collected.</p>
         </div>
+        {% endif %}
     {% elseif 1 == collector.buses|length %}
         <p class="text-muted">Ordered list of dispatched messages across all your buses</p>
         {{ _self.render_bus_messages(collector.messages, true) }}
@@ -212,4 +396,79 @@
         </tbody>
     </table>
     {% endfor %}
+{% endmacro %}
+
+{% macro render_processed_messages(messages) %}
+    {% if messages is empty %}
+        <div class="empty">
+            <p>No messages in this category.</p>
+        </div>
+    {% else %}
+        {% set discr = random() %}
+        {% for message in messages %}
+            <table class="message-item message-processed">
+                <thead>
+                    <tr>
+                        <th colspan="2" class="sf-toggle"
+                            data-toggle-selector="#processed-message-{{ discr }}-{{ loop.index0 }}-details"
+                            data-toggle-initial="{{ loop.first ? 'display' }}"
+                        >
+                            <span class="dump-inline">{{ profiler_dump(message.message.type) }}</span>
+                            {% set statusClass = {
+                                'ack': 'status-success',
+                                'retry': 'status-warning',
+                                'failed': 'status-error'
+                            }[message.status] %}
+                            {% set statusLabel = {
+                                'ack': 'Acknowledged',
+                                'retry': 'Retry scheduled',
+                                'failed': 'Failed'
+                            }[message.status] %}
+                            <span class="label {{ statusClass }}">{{ statusLabel }}</span>
+                            <button class="btn btn-link toggle-button" type="button">
+                                <span class="icon icon-close">{{ source('@WebProfiler/Icon/chevron-down.svg') }}</span>
+                                <span class="icon icon-open">{{ source('@WebProfiler/Icon/chevron-down.svg') }}</span>
+                            </button>
+                        </th>
+                    </tr>
+                </thead>
+                <tbody id="processed-message-{{ discr }}-{{ loop.index0 }}-details" class="sf-toggle-content">
+                    <tr>
+                        <th scope="row" class="font-normal">Transport</th>
+                        <td>{{ message.transport ?? 'n/a' }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row" class="font-normal">Duration</th>
+                        <td>{{ message.duration is not null ? '%.2f'|format(message.duration) ~ ' ms' : 'n/a' }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row" class="font-normal">Peak memory</th>
+                        <td>{{ message.memory is not null ? '%.2f'|format(message.memory / 1024 / 1024) ~ ' MiB' : 'n/a' }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row" class="font-normal">Outcome</th>
+                        <td>
+                            {% if message.status == 'ack' %}
+                                Acknowledged by worker
+                            {% elseif message.status == 'retry' %}
+                                Failure, scheduled for retry
+                            {% else %}
+                                Failed without retry
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row" class="font-normal">Message</th>
+                        <td>{{ profiler_dump(message.message.value, maxDepth: 2) }}</td>
+                    </tr>
+                    {% if message.exception is defined %}
+                        <tr>
+                            <th scope="row" class="font-normal">Exception</th>
+                            <td>{{ profiler_dump(message.exception.value, maxDepth: 1) }}</td>
+                        </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        {% endfor %}
+    {% endif %}
 {% endmacro %}

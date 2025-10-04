@@ -26,6 +26,10 @@ use Symfony\Component\VarDumper\Caster\ClassStub;
 class MessengerDataCollector extends DataCollector implements LateDataCollectorInterface
 {
     private array $traceableBuses = [];
+    /**
+     * @var array<int, array{message: object, transport: ?string, ack: ?bool, retry: bool, throwable: ?\Throwable, profile: array<string, mixed>}> 
+     */
+    private array $processedMessages = [];
 
     public function registerBus(string $name, TraceableMessageBus $bus): void
     {
@@ -34,12 +38,33 @@ class MessengerDataCollector extends DataCollector implements LateDataCollectorI
 
     public function collect(Request $request, Response $response, ?\Throwable $exception = null): void
     {
-        // Noop. Everything is collected live by the traceable buses & cloned as late as possible.
+        if ('messenger' === $request->attributes->get('_virtual_type') && $request->attributes->has('messenger.message')) {
+            $message = $request->attributes->get('messenger.message');
+
+            if (!\is_object($message)) {
+                return;
+            }
+
+            $this->processedMessages[] = [
+                'message' => $message,
+                'transport' => $request->attributes->get('messenger.transport'),
+                'ack' => $request->attributes->get('messenger.ack'),
+                'retry' => (bool) $request->attributes->get('messenger.retry'),
+                'throwable' => $request->attributes->get('messenger.throwable'),
+                'profile' => $request->attributes->get('messenger.profile') ?? [],
+            ];
+        }
     }
 
     public function lateCollect(): void
     {
-        $this->data = ['messages' => [], 'buses' => array_keys($this->traceableBuses)];
+        $processedMessages = array_map($this->createProcessedMessage(...), $this->processedMessages);
+
+        $this->data = [
+            'messages' => [],
+            'buses' => array_keys($this->traceableBuses),
+            'processed_messages' => $processedMessages,
+        ];
 
         $messages = [];
         foreach ($this->traceableBuses as $busName => $bus) {
@@ -67,6 +92,8 @@ class MessengerDataCollector extends DataCollector implements LateDataCollectorI
         foreach ($this->traceableBuses as $traceableBus) {
             $traceableBus->reset();
         }
+
+        $this->processedMessages = [];
     }
 
     protected function getCasters(): array
@@ -125,8 +152,69 @@ class MessengerDataCollector extends DataCollector implements LateDataCollectorI
         return array_filter($this->data['messages'], fn ($message) => $bus === $message['bus']);
     }
 
+    public function getProcessedMessages(?bool $ack = null): array
+    {
+        $messages = $this->data['processed_messages'] ?? [];
+
+        if (null === $ack) {
+            return $messages;
+        }
+
+        return array_values(array_filter($messages, static function (array $message) use ($ack): bool {
+            return (bool) $message['ack'] === $ack;
+        }));
+    }
+
     public function getBuses(): array
     {
         return $this->data['buses'];
+    }
+
+    private function createProcessedMessage(array $processed): array
+    {
+        $message = $processed['message'];
+        $profile = $processed['profile'];
+
+        $timeline = [];
+        foreach ($profile['events'] ?? [] as $event) {
+            $timeline[] = [
+                'name' => $event['name'],
+                'category' => $event['category'],
+                'origin' => $event['origin'],
+                'start_time' => $event['start_time'],
+                'end_time' => $event['end_time'],
+                'duration' => $event['duration'],
+                'memory' => $event['memory'],
+            ];
+        }
+
+        $data = [
+            'message' => [
+                'type' => new ClassStub($message::class),
+                'value' => $this->cloneVar($message),
+            ],
+            'transport' => $processed['transport'],
+            'ack' => $processed['ack'],
+            'retry' => $processed['retry'],
+            'duration' => $profile['duration'] ?? null,
+            'memory' => $profile['memory'] ?? null,
+            'origin' => $profile['origin'] ?? null,
+            'start_time' => $profile['start_time'] ?? null,
+            'end_time' => $profile['end_time'] ?? null,
+            'section' => $profile['section'] ?? null,
+            'message_hash' => $profile['message_hash'] ?? null,
+            'timeline' => $timeline,
+        ];
+
+        if ($throwable = $processed['throwable']) {
+            $data['exception'] = [
+                'type' => $throwable::class,
+                'value' => $this->cloneVar($throwable),
+            ];
+        }
+
+        $data['status'] = $processed['ack'] ? 'ack' : ($processed['retry'] ? 'retry' : 'failed');
+
+        return $data;
     }
 }
