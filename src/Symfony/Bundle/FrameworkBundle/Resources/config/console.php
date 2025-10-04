@@ -171,6 +171,7 @@ return static function (ContainerConfigurator $container) {
                 [], // Bus names
                 service('messenger.rate_limiter_locator')->nullOnInvalid(),
                 null,
+                service('messenger.command.consume_messages_profiler')->nullOnInvalid(),
             ])
             ->tag('console.command')
             ->tag('monolog.logger', ['channel' => 'messenger'])
